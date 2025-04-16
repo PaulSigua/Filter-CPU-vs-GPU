@@ -6,7 +6,8 @@
 #include <algorithm>
 #include <iomanip>              // Para std::fixed y std::setprecision
 #include <cuda_runtime.h>
-#include <omp.h>                // Inclusión de OpenMP
+#include <thread>
+#include <vector>
 
 // Incluir las librerías de stb para carga/escritura de imágenes
 #define STB_IMAGE_IMPLEMENTATION
@@ -20,6 +21,10 @@
 #ifndef PI
 #define PI 3.14159265358979323846
 #endif
+
+// Definición de macros para minimizar sobrecarga en funciones de min/max
+#define MIN(a,b) (((a) < (b)) ? (a) : (b))
+#define MAX(a,b) (((a) > (b)) ? (a) : (b))
 
 // ---------------------------------------------------------------------
 // Generar filtro Laplacian of Gaussian (LoG) de tamaño NxN con sigma dado
@@ -40,7 +45,7 @@ void generateLoGFilter(float* mask, int size, float sigma) {
             sum += value;
         }
     }
-    // Comentamos la normalización para que el filtro mantenga mayor efecto
+    // Se comenta la normalización para que el filtro mantenga mayor efecto
     /*
     if (sum != 0.0f) {
         for (int idx = 0; idx < size * size; ++idx) {
@@ -62,37 +67,45 @@ void cartoonLaplaceCPU(const unsigned char* input,
     float threshold)
 {
     int half = maskSize / 2;
+    int numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 4; // fallback por si hardware_concurrency falla
 
-    // Paralelizamos los bucles sobre las coordenadas y y x.
-#pragma omp parallel for collapse(2)
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            // Procesar cada canal (R, G y B)
-            for (int c = 0; c < CHANNELS; ++c) {
-                int idx = (y * width + x) * CHANNELS + c;
-
-                // 1) Cuantización (cartoon)
-                int pixVal = input[idx];
-                int quant = ((pixVal / quantStep) * quantStep) + (quantStep / 2);
-                quant = std::max(0, std::min(255, quant));
-
-                // 2) Convolución con el filtro Laplaciano (LoG)
-                float lap = 0.0f;
-                for (int j = -half; j <= half; ++j) {
-                    for (int i = -half; i <= half; ++i) {
-                        int nx = std::max(0, std::min(x + i, width - 1));
-                        int ny = std::max(0, std::min(y + j, height - 1));
-                        float w = lapMask[(j + half) * maskSize + (i + half)];
-                        lap += input[(ny * width + nx) * CHANNELS + c] * w;
+    auto worker = [&](int startY, int endY) {
+        for (int y = startY; y < endY; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int baseIndex = (y * width + x) * CHANNELS;
+                for (int c = 0; c < CHANNELS; c++) {
+                    int pixVal = input[baseIndex + c];
+                    int quant = ((pixVal / quantStep) * quantStep) + (quantStep / 2);
+                    float lap = 0.0f;
+                    for (int j = -half; j <= half; j++) {
+                        for (int i = -half; i <= half; i++) {
+                            int nx = std::max(0, std::min(x + i, width - 1));
+                            int ny = std::max(0, std::min(y + j, height - 1));
+                            int nIndex = (ny * width + nx) * CHANNELS + c;
+                            lap += input[nIndex] * lapMask[(j + half) * maskSize + (i + half)];
+                        }
                     }
+                    output[baseIndex + c] = (fabs(lap) > threshold) ?
+                        0 : static_cast<unsigned char>(std::min(255, std::max(0, quant)));
                 }
-                // 3) Unificación: si el valor absoluto del laplaciano supera el threshold se marca como borde negro (0)
-                float lapAbs = fabs(lap);
-                output[idx] = (lapAbs > threshold) ? 0 : static_cast<unsigned char>(std::max(0, std::min(quant, 255)));
             }
         }
+        };
+
+    std::vector<std::thread> threads;
+    int rowsPerThread = height / numThreads;
+    for (int t = 0; t < numThreads; ++t) {
+        int startY = t * rowsPerThread;
+        int endY = (t == numThreads - 1) ? height : startY + rowsPerThread;
+        threads.emplace_back(worker, startY, endY);
+    }
+
+    for (auto& th : threads) {
+        th.join();
     }
 }
+
 
 // ---------------------------------------------------------------------
 // GPU - Kernel que aplica el filtro Cartoon + Laplaciano unificado
@@ -118,21 +131,20 @@ __global__ void cartoonLaplaceKernel(const unsigned char* input,
         // 1) Cuantización
         int origVal = input[idx];
         int quant = ((origVal / quantStep) * quantStep) + (quantStep / 2);
-        quant = max(0, min(255, quant));
+        quant = MAX(0, MIN(255, quant));
 
         // 2) Convolución con el filtro Laplaciano
         float lap = 0.0f;
         for (int j = -half; j <= half; ++j) {
             for (int i = -half; i <= half; ++i) {
-                int nx = min(max(x + i, 0), width - 1);
-                int ny = min(max(y + j, 0), height - 1);
+                int nx = MIN(MAX(x + i, 0), width - 1);
+                int ny = MIN(MAX(y + j, 0), height - 1);
                 float w = lapMask[(j + half) * maskSize + (i + half)];
                 lap += input[(ny * width + nx) * CHANNELS + c] * w;
             }
         }
         // 3) Evaluación del threshold para determinar borde
-        float lapAbs = fabsf(lap);
-        output[idx] = (lapAbs > threshold) ? 0 : static_cast<unsigned char>(max(0, min(quant, 255)));
+        output[idx] = (fabsf(lap) > threshold) ? 0 : static_cast<unsigned char>(MAX(0, MIN(quant, 255)));
     }
 }
 
@@ -159,7 +171,7 @@ void processCartoonLaplace(const unsigned char* h_input,
 
     // -------------------- CPU --------------------
     auto t_start = std::chrono::high_resolution_clock::now();
-    // Ejecuta la versión paralela de la CPU
+    // Ejecuta la versión paralela de la CPU (ahora utilizando todos los hilos)
     cartoonLaplaceCPU(h_input, h_outputCPU, h_lapMask, width, height, maskSize, quantStep, threshold);
     auto t_end = std::chrono::high_resolution_clock::now();
     double cpuTime = std::chrono::duration<double>(t_end - t_start).count();
@@ -168,7 +180,8 @@ void processCartoonLaplace(const unsigned char* h_input,
     stbi_write_jpg(cpuFile.c_str(), width, height, CHANNELS, h_outputCPU, 100);
 
     // -------------------- GPU --------------------
-    unsigned char* d_input = nullptr, * d_output = nullptr;
+    unsigned char* d_input = nullptr;
+    unsigned char* d_output = nullptr;
     float* d_lapMask = nullptr;
     cudaMalloc(&d_input, imgSize);
     cudaMalloc(&d_output, imgSize);
@@ -208,22 +221,12 @@ void processCartoonLaplace(const unsigned char* h_input,
     std::cout << " Tiempo CPU: " << cpuTime * 1000.0 << " ms \n";
     std::cout << " Tiempo GPU: " << gpuTime * 1000.0 << " ms \n";
 
+    // Comparación de resultados: suma de diferencias absolutas por píxel
     size_t totalPixels = width * height * CHANNELS;
-    for (size_t i = 0; i < totalPixels; i++) {
-        int diff = abs(static_cast<int>(h_outputCPU[i]) - static_cast<int>(h_outputGPU[i]));
-    }
-
-    // ---------------------------------------------------------------------
-    // Comparación de resultados entre CPU y GPU para la máscara en cuestión
-    // ---------------------------------------------------------------------
     double errorSum = 0.0;
     for (size_t i = 0; i < totalPixels; i++) {
-        // Se suma la diferencia absoluta de cada píxel.
-        int diff = abs(static_cast<int>(h_outputCPU[i]) - static_cast<int>(h_outputGPU[i]));
-        errorSum += diff;
+        errorSum += abs(static_cast<int>(h_outputCPU[i]) - static_cast<int>(h_outputGPU[i]));
     }
-
-    // Configurar mayor precisión en la salida (por ejemplo, 10 decimales)
     std::cout << std::fixed << std::setprecision(10);
     std::cout << " Error (diferencia de pixeles): " << errorSum << "\n";
 
@@ -245,7 +248,7 @@ int main() {
 
     // Parámetros de la operación
     int quantStep = 64;      // Paso de cuantización para el efecto cartoon
-    float threshold = 20.0f; // Umbral para detección de bordes (ajustado a 20.0 para efecto visible)
+    float threshold = 20.0f; // Umbral para detección de bordes
     float sigma = 2.0f;      // Sigma para el filtro LoG
 
     // Se procesará para tres tamaños de máscara: 9x9, 13x13 y 21x21

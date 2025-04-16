@@ -31,6 +31,7 @@ public class JavaProyectFilter {
     private static final int CHANNELS = 3; // procesamos R, G y B
 
     static class Result {
+
         int maskSize;
         double timeSeq;
         double timePar;
@@ -101,7 +102,7 @@ public class JavaProyectFilter {
                             maskSize, maskSize,
                             timeSeq, timePar,
                             (double) error);
-                    
+
                     results.add(new Result(maskSize, timeSeq, timePar, error));
                 }
 
@@ -115,9 +116,10 @@ public class JavaProyectFilter {
     }
 
     /**
-     * Calcula el error entre dos arreglos de píxeles (por ejemplo, de las imágenes de CPU y GPU).
-     * Se recorre cada píxel (considerando sus 3 canales) y si para ese píxel hay al menos un canal diferente,
-     * se incrementa el error.
+     * Calcula el error entre dos arreglos de píxeles (por ejemplo, de las
+     * imágenes de CPU y GPU). Se recorre cada píxel (considerando sus 3
+     * canales) y si para ese píxel hay al menos un canal diferente, se
+     * incrementa el error.
      *
      * @param cpuResult Arreglo resultante del procesamiento secuencial.
      * @param gpuResult Arreglo resultante del procesamiento paralelo.
@@ -149,7 +151,8 @@ public class JavaProyectFilter {
     }
 
     /**
-     * Convierte una imagen a un formato de 3 bytes por píxel (color), de tipo TYPE_3BYTE_BGR.
+     * Convierte una imagen a un formato de 3 bytes por píxel (color), de tipo
+     * TYPE_3BYTE_BGR.
      */
     public static BufferedImage convertTo3ByteColor(BufferedImage original) {
         if (original.getType() == BufferedImage.TYPE_3BYTE_BGR) {
@@ -203,8 +206,8 @@ public class JavaProyectFilter {
      * Versión secuencial del filtro para imágenes en color (RGB).
      */
     public static void cartoonLaplaceCPURGB(byte[] input, byte[] output, float[] lapMask,
-                                             int width, int height, int maskSize,
-                                             int quantStep, float threshold) {
+            int width, int height, int maskSize,
+            int quantStep, float threshold) {
         int half = maskSize / 2;
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
@@ -221,7 +224,8 @@ public class JavaProyectFilter {
                             lap += Byte.toUnsignedInt(input[nIndex]) * lapMask[(j + half) * maskSize + (i + half)];
                         }
                     }
-                    output[baseIndex + c] = (Math.abs(lap) > threshold) ? 0 : (byte) Math.min(255, Math.max(0, quant));
+                    output[baseIndex + c] = (Math.abs(lap) > threshold)
+                            ? 0 : (byte) Math.min(255, Math.max(0, quant));
                 }
             }
         }
@@ -231,8 +235,8 @@ public class JavaProyectFilter {
      * Versión paralela del filtro para imágenes en color (RGB).
      */
     public static void cartoonLaplaceParallelRGB(byte[] input, byte[] output, float[] lapMask,
-                                                  int width, int height, int maskSize,
-                                                  int quantStep, float threshold) {
+            int width, int height, int maskSize,
+            int quantStep, float threshold) {
         int threads = Runtime.getRuntime().availableProcessors();
         ExecutorService executor = Executors.newFixedThreadPool(threads);
         int rowsPerThread = height / threads;
@@ -273,6 +277,7 @@ public class JavaProyectFilter {
 }
 
 class GraphFrame extends JFrame {
+
     public GraphFrame(List<JavaProyectFilter.Result> results) {
         setTitle("Comparación Secuencial vs Paralelo");
         setSize(700, 500);
@@ -283,6 +288,7 @@ class GraphFrame extends JFrame {
 }
 
 class GraphPanel extends JPanel {
+
     private final List<JavaProyectFilter.Result> results;
 
     public GraphPanel(List<JavaProyectFilter.Result> results) {
@@ -332,7 +338,7 @@ class GraphPanel extends JPanel {
             g.drawString(r.maskSize + "x" + r.maskSize, xBase + 5, panelHeight - margin + 35);
             // Mostrar el error en cada kernel con dos decimales
             g.setColor(Color.RED);
-            g.drawString("Error: " + String.format("%.2f", (double)r.error), xBase, panelHeight - margin + 55);
+            g.drawString("Error: " + String.format("%.2f", (double) r.error), xBase, panelHeight - margin + 55);
         }
     }
 }
